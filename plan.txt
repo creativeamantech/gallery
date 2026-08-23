@@ -1,0 +1,64 @@
+PHASE 3 PLAN
+
+1. Files to create:
+   - app/src/main/java/com/google/ai/edge/gallery/agent/AgentState.kt (State representation)
+   - app/src/main/java/com/google/ai/edge/gallery/agent/UniversalAgentRuntimeExecutor.kt (The new Kotlin loop)
+   - app/src/test/java/com/google/ai/edge/gallery/agent/UniversalAgentRuntimeExecutorTest.kt (Comprehensive tests with FakeModelProvider)
+
+2. Files to modify:
+   - None directly required for existing classes unless extending AgentEvent.
+   - We will extend AgentEvent in app/src/main/java/com/google/ai/edge/gallery/agent/AgentEvent.kt to add explicit observability events if needed, but we can reuse the existing `AgentEvent.StreamToken` for text. Wait, the prompt says "Potential events: AgentStarted, AgentThinking/Planning summary, CapabilityRequested, CapabilityStarted, CapabilityCompleted, CapabilityFailed, AgentCompleted, AgentFailed, AgentCancelled". But it also says "extend the existing sealed hierarchy carefully."
+   - Actually, we'll modify `AgentEvent.kt` to add these diagnostic/observability events.
+
+3. Why each file changes:
+   - `AgentEvent.kt`: To support structured observation of capabilities (CapabilityRequested, CapabilityCompleted, etc.).
+   - `AgentState.kt`: New state object to track iteration limits, history, and status without mutating request models.
+   - `UniversalAgentRuntimeExecutor.kt`: The new core ReAct loop that pulls from `ModelProvider`, intercepts `ToolCallRequestEvent`, calls `CapabilityDispatcher`, appends `ModelContent.ToolResult`, and loops back to `ModelProvider`.
+   - `UniversalAgentRuntimeExecutorTest.kt`: Tests the entire loop using `FakeModelProvider` ensuring Kotlin is fully orchestrating the capability flow without LiteRT dependencies.
+
+4. Agent Loop Architecture:
+   AgentRuntimeExecutor API is implemented by `UniversalAgentRuntimeExecutor`.
+   `executeStream`:
+   - Initialize `AgentState`.
+   - Loop `while (status == RUNNING || status == WAITING_FOR_CAPABILITY)`:
+     - check limits (max iterations, max tool calls).
+     - send `ModelRequest` to `ModelProvider.generate`.
+     - collect events.
+     - if `TextChunk`, emit `AgentEvent.StreamToken`.
+     - if `ToolCallRequestEvent`:
+         - emit `CapabilityRequested`.
+         - pause Model loop.
+         - lookup Capability.
+         - emit `CapabilityStarted`.
+         - execute Capability via `CapabilityDispatcher`.
+         - emit `CapabilityCompleted` or `CapabilityFailed`.
+         - append `ToolResult` to `AgentState.history`.
+         - update `status = WAITING_FOR_CAPABILITY`. // This will trigger the outer loop to call `ModelProvider` again.
+     - if `Completion`:
+         - `status = COMPLETED`.
+         - emit `AgentEvent.LoopTerminated`.
+     - if `Error`:
+         - handle retries or fail.
+         
+5. LiteRT Compatibility Strategy:
+   We leave `DefaultAgentRuntimeExecutor` exactly as it is (MODE A - LEGACY).
+   `UniversalAgentRuntimeExecutor` represents MODE B - UNIVERSAL.
+   When `UniversalAgentRuntimeExecutor` is configured with `LiteRtModelProvider`, the provider will only ever emit `TextChunk` and `Completion` (because LiteRT handles its own tool loop natively in C++). Thus, `UniversalAgentRuntimeExecutor` safely degrades to a simple passthrough loop, ensuring no duplicate capability execution. The architecture makes the mode explicit based on which Executor is instantiated.
+
+6. Event Strategy:
+   Extend `AgentEvent` with:
+   - `CapabilityRequested(val name: String, val args: StructuredData)`
+   - `CapabilityCompleted(val name: String, val result: CapabilityResult)`
+   These will not expose chain-of-thought, just structured metadata.
+
+7. State Strategy:
+   `AgentState` will manage:
+   - `history: MutableList<ModelMessage>`
+   - `iterationCount`
+   - `toolCallCount`
+   - `status: AgentStatus`
+   Limits (max_iterations=10, max_tools=20) will prevent infinite loops.
+
+8. Testing Strategy:
+   Create `UniversalAgentRuntimeExecutorTest` using `FakeModelProvider` (that emits a tool call, completes, etc.).
+   Verify that `UniversalAgentRuntimeExecutor` intercepts the tool call, executes the `FakeCapability`, appends the result to the history, and invokes the model again.
