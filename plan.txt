@@ -1,64 +1,49 @@
-PHASE 3 PLAN
+PHASE 8 IMPLEMENTATION PLAN
 
-1. Files to create:
-   - app/src/main/java/com/google/ai/edge/gallery/agent/AgentState.kt (State representation)
-   - app/src/main/java/com/google/ai/edge/gallery/agent/UniversalAgentRuntimeExecutor.kt (The new Kotlin loop)
-   - app/src/test/java/com/google/ai/edge/gallery/agent/UniversalAgentRuntimeExecutorTest.kt (Comprehensive tests with FakeModelProvider)
+1. WebView Lifecycle & Ownership Model
+- Create `ActiveWebViewRegistry` (Singleton).
+- Use `WeakReference<WebView>` to track the currently active WebView safely without leaking memory or retaining destroyed Activities.
+- Add `attach(WebView)` and `detach(WebView)` methods.
 
-2. Files to modify:
-   - None directly required for existing classes unless extending AgentEvent.
-   - We will extend AgentEvent in app/src/main/java/com/google/ai/edge/gallery/agent/AgentEvent.kt to add explicit observability events if needed, but we can reuse the existing `AgentEvent.StreamToken` for text. Wait, the prompt says "Potential events: AgentStarted, AgentThinking/Planning summary, CapabilityRequested, CapabilityStarted, CapabilityCompleted, CapabilityFailed, AgentCompleted, AgentFailed, AgentCancelled". But it also says "extend the existing sealed hierarchy carefully."
-   - Actually, we'll modify `AgentEvent.kt` to add these diagnostic/observability events.
+2. Navigation Architecture & JS Bridge
+- `AndroidWebViewObservationProvider` and `AndroidWebViewInteractionProvider` will resolve the WebView via `ActiveWebViewRegistry.get()`.
+- If null, return `CapabilityAvailability.UNAVAILABLE`.
+- No new Java-to-JS `@JavascriptInterface` objects are needed. Instead, we use `WebView.evaluateJavascript` to inject structured JS payloads and retrieve results. This inherently runs in the WebView's JS context safely.
 
-3. Why each file changes:
-   - `AgentEvent.kt`: To support structured observation of capabilities (CapabilityRequested, CapabilityCompleted, etc.).
-   - `AgentState.kt`: New state object to track iteration limits, history, and status without mutating request models.
-   - `UniversalAgentRuntimeExecutor.kt`: The new core ReAct loop that pulls from `ModelProvider`, intercepts `ToolCallRequestEvent`, calls `CapabilityDispatcher`, appends `ModelContent.ToolResult`, and loops back to `ModelProvider`.
-   - `UniversalAgentRuntimeExecutorTest.kt`: Tests the entire loop using `FakeModelProvider` ensuring Kotlin is fully orchestrating the capability flow without LiteRT dependencies.
+3. Existing WebView Clients
+- `GalleryWebView` currently accepts an `onWebViewCreated` callback. 
+- We will minimally update `GalleryWebView` (or its consumers) to attach to `ActiveWebViewRegistry` in `onWebViewCreated` and detach in `onRelease`.
+- `BaseGalleryWebViewClient` and other client logic remain completely unchanged, preserving existing URL intercept and console behaviors.
 
-4. Agent Loop Architecture:
-   AgentRuntimeExecutor API is implemented by `UniversalAgentRuntimeExecutor`.
-   `executeStream`:
-   - Initialize `AgentState`.
-   - Loop `while (status == RUNNING || status == WAITING_FOR_CAPABILITY)`:
-     - check limits (max iterations, max tool calls).
-     - send `ModelRequest` to `ModelProvider.generate`.
-     - collect events.
-     - if `TextChunk`, emit `AgentEvent.StreamToken`.
-     - if `ToolCallRequestEvent`:
-         - emit `CapabilityRequested`.
-         - pause Model loop.
-         - lookup Capability.
-         - emit `CapabilityStarted`.
-         - execute Capability via `CapabilityDispatcher`.
-         - emit `CapabilityCompleted` or `CapabilityFailed`.
-         - append `ToolResult` to `AgentState.history`.
-         - update `status = WAITING_FOR_CAPABILITY`. // This will trigger the outer loop to call `ModelProvider` again.
-     - if `Completion`:
-         - `status = COMPLETED`.
-         - emit `AgentEvent.LoopTerminated`.
-     - if `Error`:
-         - handle retries or fail.
-         
-5. LiteRT Compatibility Strategy:
-   We leave `DefaultAgentRuntimeExecutor` exactly as it is (MODE A - LEGACY).
-   `UniversalAgentRuntimeExecutor` represents MODE B - UNIVERSAL.
-   When `UniversalAgentRuntimeExecutor` is configured with `LiteRtModelProvider`, the provider will only ever emit `TextChunk` and `Completion` (because LiteRT handles its own tool loop natively in C++). Thus, `UniversalAgentRuntimeExecutor` safely degrades to a simple passthrough loop, ensuring no duplicate capability execution. The architecture makes the mode explicit based on which Executor is instantiated.
+4. Hilt Integration & Provider Attachment
+- Create `app/src/main/java/com/google/ai/edge/gallery/capabilities/web/android/AndroidWebViewObservationProvider.kt`
+- Create `app/src/main/java/com/google/ai/edge/gallery/capabilities/web/android/AndroidWebViewInteractionProvider.kt`
+- Update `WebCapabilityModule` to provide these Android implementations (bound to the universal interfaces) instead of the `Fake` providers.
 
-6. Event Strategy:
-   Extend `AgentEvent` with:
-   - `CapabilityRequested(val name: String, val args: StructuredData)`
-   - `CapabilityCompleted(val name: String, val result: CapabilityResult)`
-   These will not expose chain-of-thought, just structured metadata.
+5. Exact Files to Create
+- `app/src/main/java/com/google/ai/edge/gallery/capabilities/web/android/ActiveWebViewRegistry.kt`
+- `app/src/main/java/com/google/ai/edge/gallery/capabilities/web/android/AndroidWebViewObservationProvider.kt`
+- `app/src/main/java/com/google/ai/edge/gallery/capabilities/web/android/AndroidWebViewInteractionProvider.kt`
+- `app/src/main/java/com/google/ai/edge/gallery/capabilities/web/android/WebJavascriptTemplates.kt` (Holds safe JS extraction logic)
+- `app/src/androidTest/java/com/google/ai/edge/gallery/capabilities/web/android/UniversalAgentWebViewTestActivity.kt`
+- `app/src/androidTest/java/com/google/ai/edge/gallery/capabilities/web/android/AndroidWebViewProvidersTest.kt`
 
-7. State Strategy:
-   `AgentState` will manage:
-   - `history: MutableList<ModelMessage>`
-   - `iterationCount`
-   - `toolCallCount`
-   - `status: AgentStatus`
-   Limits (max_iterations=10, max_tools=20) will prevent infinite loops.
+6. Exact Files to Modify
+- `app/src/main/java/com/google/ai/edge/gallery/capabilities/web/WebCapabilityModule.kt`: Update to inject Android providers.
+- `app/src/main/java/com/google/ai/edge/gallery/ui/common/GalleryWebView.kt`: Inject/attach to registry upon creation and detach on release.
+- `app/src/main/AndroidManifest.xml`: Register the `UniversalAgentWebViewTestActivity` for instrumentation tests.
+- `app/src/test/java/com/google/ai/edge/gallery/capabilities/web/WebCapabilitiesTest.kt`: Ensure pure JVM tests continue to use `FakeWebProviders`.
 
-8. Testing Strategy:
-   Create `UniversalAgentRuntimeExecutorTest` using `FakeModelProvider` (that emits a tool call, completes, etc.).
-   Verify that `UniversalAgentRuntimeExecutor` intercepts the tool call, executes the `FakeCapability`, appends the result to the history, and invokes the model again.
+7. Instrumentation Strategy
+- `UniversalAgentWebViewTestActivity` will host a `GalleryWebView` loaded with a local deterministic HTML string (`loadDataWithBaseURL`).
+- `AndroidWebViewProvidersTest` will use standard Compose test rules to launch the activity, wait for `pageFinished`, and directly call `AndroidWebViewObservationProvider` and `AndroidWebViewInteractionProvider` to verify real JS DOM extraction and interaction.
+
+8. Security Considerations
+- Navigation targets are validated: schemas restricted to `http`, `https` (plus `data` for our local test). `javascript:` will be explicitly rejected by the interaction provider returning `NAVIGATION_BLOCKED`.
+- JS payloads are hardcoded templates (in `WebJavascriptTemplates`), completely isolated from LLM-generated code.
+- Passwords and sensitive input values are redacted to `***` within the JS template *before* reaching Kotlin, and strictly enforced again in Kotlin. No arbitrary script evaluation is exposed to the Agent.
+
+9. Performance Considerations
+- The DOM JS extractor enforces strict bounds: Max depth = 15, Max nodes = 500, Max string length = 200.
+- `evaluateJavascript` is executed safely on the Main thread using Kotlin coroutines (`suspendCancellableCoroutine`) with timeout boundaries to prevent blocking the coroutine context indefinitely.
+- Irrelevant nodes (scripts, styles, layout wrappers without text/interactivity) are pruned during JSON serialization.

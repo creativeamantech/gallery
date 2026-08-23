@@ -226,9 +226,11 @@ fun GalleryWebView(
           }
         }
         onWebViewCreated?.invoke(this)
+        com.google.ai.edge.gallery.capabilities.web.android.ActiveWebViewRegistry.attach(this)
       }
     },
     onRelease = { webView ->
+      com.google.ai.edge.gallery.capabilities.web.android.ActiveWebViewRegistry.detach(webView)
       webView.stopLoading()
       webView.destroy()
     },

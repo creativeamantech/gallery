@@ -169,6 +169,9 @@
         <uses-native-library android:name="libedgetpu_litert.so" android:required="false" />
         <uses-native-library android:name="libedgetpu_util.so" android:required="false"/>
         <uses-native-library android:name="libedgetpu_client.google.so" android:required="false"/>
+            <service android:name=".capabilities.ui.android.UniversalAccessibilityService" android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE" android:exported="false"><intent-filter><action android:name="android.accessibilityservice.AccessibilityService" /></intent-filter><meta-data android:name="android.accessibilityservice" android:resource="@xml/universal_accessibility_service_config" /></service>
+            <activity android:name=".capabilities.ui.test.UniversalAgentTestActivity" android:exported="false" android:theme="@style/Theme.Gallery" />
+            <activity android:name=".capabilities.web.android.UniversalAgentWebViewTestActivity" android:exported="false" android:theme="@style/Theme.Gallery" />
     </application>
 
 </manifest>
